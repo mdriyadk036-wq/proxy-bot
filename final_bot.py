@@ -1,19 +1,19 @@
-import telebot, sqlite3, os, threading
+import telebot, sqlite3, os, threading, datetime
 from telebot import types
 from flask import Flask
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BKASH_NUMBER = os.getenv("BKASH_NUMBER", "017XXXXXXXX")
+GROUP_ID = os.getenv("GROUP_ID", "")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "✅ Bot is 24/7 Online - Stock Quantity System!"
+    return "✅ Bot is 24/7 Online - Group Notify + /id!"
 
 def run_flask():
-    # Render er PORT env use korbe
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -24,7 +24,7 @@ with db_lock:
     conn.execute("CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0)")
     conn.execute("CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER, proxy TEXT, status TEXT DEFAULT 'available', sold_to INTEGER, FOREIGN KEY(product_id) REFERENCES products(id))")
     conn.execute("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, trxid TEXT, status TEXT DEFAULT 'pending')")
-    conn.execute("CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, proxy TEXT, product_name TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, proxy TEXT, product_name TEXT, price REAL, order_time TEXT)")
     conn.commit()
 
 def get_cur(): return conn.cursor()
@@ -58,10 +58,14 @@ def start(m):
         cur.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (m.from_user.id,))
         conn.commit()
     if m.from_user.id == ADMIN_ID:
-        bot.send_message(m.chat.id, "✅ Bot 24/7 Ready! Stock System!\nWelcome Admin!", reply_markup=admin_kb())
-        bot.send_message(m.chat.id, "🔐 Admin Panel (Stock Quantity):", reply_markup=admin_inline())
+        bot.send_message(m.chat.id, "✅ Bot 24/7 Ready! Group Notify ON!\nWelcome Admin!", reply_markup=admin_kb())
+        bot.send_message(m.chat.id, "🔐 Admin Panel:", reply_markup=admin_inline())
     else:
         bot.send_message(m.chat.id, "✅ Welcome!", reply_markup=user_kb())
+
+@bot.message_handler(commands=['id', 'groupid'])
+def group_id_cmd(m):
+    bot.reply_to(m, f"🆔 Chat ID: `{m.chat.id}`\nType: {m.chat.type}", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "💳 Balance")
 def bal(m):
@@ -104,7 +108,7 @@ def deposit_step(m):
         bot.send_message(m.chat.id, "✅ Deposit request sent!")
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"dep_approve_{dep_id}"), types.InlineKeyboardButton("❌ Reject", callback_data=f"dep_reject_{dep_id}"))
-        bot.send_message(ADMIN_ID, f"📥 *New Deposit!*\nUser: `{m.from_user.id}`\nAmount: {amount}\nTrxID: `{trxid}`\nID: {dep_id}\n\n👆 *TrxID tap to copy*", parse_mode="Markdown", reply_markup=kb)
+        bot.send_message(ADMIN_ID, f"📥 *New Deposit!*\nUser: `{m.from_user.id}`\nAmount: {amount}\nTrxID: `{trxid}`\nID: {dep_id}", parse_mode="Markdown", reply_markup=kb)
     except:
         bot.send_message(m.chat.id, "❌ Wrong format! Ex: 100 TrxID123")
 
@@ -115,12 +119,12 @@ def buy(m):
         cur.execute("SELECT id, name, price, stock FROM products WHERE stock > 0")
         rows = cur.fetchall()
     if not rows:
-        bot.send_message(m.chat.id, "❌ Out of stock! Admin will add soon.")
+        bot.send_message(m.chat.id, "❌ Out of stock!")
         return
     kb = types.InlineKeyboardMarkup()
     for pid, name, price, stock in rows:
         kb.add(types.InlineKeyboardButton(f"{name} ৳{price} - {stock} stock", callback_data=f"buy_prod_{pid}"))
-    bot.send_message(m.chat.id, "🛍️ *Available Products:*\nButton e click koro, kinle 1 stock kombe!", parse_mode="Markdown", reply_markup=kb)
+    bot.send_message(m.chat.id, "🛍️ *Available Products:*", parse_mode="Markdown", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_prod_"))
 def buy_prod_cb(c):
@@ -145,15 +149,26 @@ def buy_prod_cb(c):
             bot.answer_callback_query(c.id, "❌ No code found!")
             return
         proxy_id, proxy_code = proxy_row
+        order_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (price, c.from_user.id))
         cur.execute("UPDATE proxies SET status='sold', sold_to=? WHERE id=?", (c.from_user.id, proxy_id))
         cur.execute("UPDATE products SET stock=stock-1 WHERE id=?", (pid,))
-        cur.execute("INSERT INTO purchases (user_id, proxy, product_name) VALUES (?, ?, ?)", (c.from_user.id, proxy_code, pname))
+        cur.execute("INSERT INTO purchases (user_id, proxy, product_name, price, order_time) VALUES (?, ?, ?, ?, ?)", (c.from_user.id, proxy_code, pname, price, order_time))
+        order_id = cur.lastrowid
         conn.commit()
         cur.execute("SELECT stock FROM products WHERE id=?", (pid,))
         new_stock = cur.fetchone()[0]
+
     bot.answer_callback_query(c.id, "✅ Purchased!")
-    bot.send_message(c.message.chat.id, f"✅ *Bought {pname}!*\n\nCode:\n`{proxy_code}`\n\nPrice: ৳{price}\nRemaining Stock: {new_stock} pcs", parse_mode="Markdown")
+    bot.send_message(c.message.chat.id, f"✅ *Bought {pname}!*\nOrder ID: `#{order_id}`\n\nCode:\n`{proxy_code}`\n\nPrice: ৳{price}\nRemaining: {new_stock} pcs", parse_mode="Markdown")
+
+    if GROUP_ID:
+        try:
+            buyer_name = f"@{c.from_user.username}" if c.from_user.username else c.from_user.first_name
+            group_msg = f"🛍️ *New Order!*\n\n📦 Product: *{pname}*\n🆔 Order ID: `#{order_id}`\n👤 Buyer: {buyer_name} (`{c.from_user.id}`)\n💰 Price: ৳{price}\n📊 Status: *Paid ✅*\n📦 Stock Left: *{new_stock} pcs*\n⏰ Time: {order_time}"
+            bot.send_message(GROUP_ID, group_msg, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Group send error: {e}")
 
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile(m):
@@ -166,13 +181,13 @@ def profile(m):
 @bot.message_handler(func=lambda m: m.text == "🔐 Admin Panel")
 def admin_panel(m):
     if m.from_user.id == ADMIN_ID:
-        bot.send_message(m.chat.id, "🔐 Admin Panel (Stock Quantity):", reply_markup=admin_inline())
+        bot.send_message(m.chat.id, "🔐 Admin Panel:", reply_markup=admin_inline())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_"))
 def admin_cb(c):
     if c.from_user.id != ADMIN_ID: return
     if c.data == "adm_add_product":
-        bot.send_message(c.message.chat.id, "1️⃣ *Notun Product er Nam ki?*\nEx: `9proxy 50mb`", parse_mode="Markdown")
+        bot.send_message(c.message.chat.id, "1️⃣ *Product Nam?* Ex: `9proxy 50mb`", parse_mode="Markdown")
         bot.register_next_step_handler(c.message, admin_add_product_name)
     elif c.data == "adm_add_stock":
         with db_lock:
@@ -191,13 +206,10 @@ def admin_cb(c):
             cur = get_cur()
             cur.execute("SELECT id, name, price, stock FROM products ORDER BY stock DESC")
             rows = cur.fetchall()
-        if not rows:
-            bot.send_message(c.message.chat.id, "📦 No products!")
-        else:
-            txt = "📦 *Stock Quantity:*\n\n"
-            for pid, name, price, stock in rows:
-                txt += f"ID:{pid} | {name} ৳{price}\nStock: *{stock}* pcs\n\n"
-            bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
+        txt = "📦 *Stock:*\n\n" if rows else "No products!"
+        for pid, name, price, stock in rows:
+            txt += f"ID:{pid} | {name} ৳{price}\nStock: *{stock}* pcs\n\n"
+        bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
     elif c.data == "adm_deps":
         with db_lock:
             cur = get_cur()
@@ -221,7 +233,7 @@ def admin_cb(c):
             cur = get_cur()
             cur.execute("SELECT p.name, pr.proxy, pr.status FROM proxies pr JOIN products p ON pr.product_id=p.id ORDER BY p.name LIMIT 20")
             rows = cur.fetchall()
-        txt = "📋 All Codes (20 latest):\n\n" if rows else "No codes!"
+        txt = "📋 All Codes:\n\n" if rows else "No codes!"
         for name, code, status in rows:
             icon = "✅" if status == 'available' else "❌"
             txt += f"{icon} {name}: `{code}` - {status}\n"
@@ -241,7 +253,7 @@ def admin_add_product_price(m):
             cur.execute("INSERT INTO products (name, price, stock) VALUES (?, ?, 0)", (name, price))
             conn.commit()
             pid = cur.lastrowid
-        bot.send_message(m.chat.id, f"✅ *Product Added!*\nID:{pid}\nName: {name}\nPrice: ৳{price}\nStock: 0 pcs\n\n📦 Add Stock e click kore code add koro!", parse_mode="Markdown")
+        bot.send_message(m.chat.id, f"✅ Product Added!\nID:{pid}\nName: {name}\nPrice: ৳{price}\nStock: 0 pcs", parse_mode="Markdown")
         admin_temp.pop(m.from_user.id, None)
     except Exception as e:
         bot.send_message(m.chat.id, f"❌ Error: {e}")
@@ -254,7 +266,7 @@ def addstock_cb(c):
         cur = get_cur()
         cur.execute("SELECT name FROM products WHERE id=?", (pid,))
         name = cur.fetchone()[0]
-    bot.send_message(c.message.chat.id, f"📦 *{name}* e stock add korba\n\nProxy code gulo pathao, ek line e ekta!\nEx:\n`code1\ncode2\ncode3`\n\n10 ta pathale 10 stock barbe!", parse_mode="Markdown")
+    bot.send_message(c.message.chat.id, f"📦 *{name}* e stock add korba\nEk line e ekta code dao!", parse_mode="Markdown")
     bot.register_next_step_handler(c.message, admin_add_stock_codes)
 
 def admin_add_stock_codes(m):
@@ -271,7 +283,7 @@ def admin_add_stock_codes(m):
             conn.commit()
             cur.execute("SELECT name, stock, price FROM products WHERE id=?", (pid,))
             name, stock, price = cur.fetchone()
-        bot.send_message(m.chat.id, f"✅ *Stock Added!*\nProduct: {name}\nAdded: {len(codes)} pcs\nTotal Stock: *{stock}* pcs\n\nUser dekhbe: `{name} ৳{price} - {stock} stock`", parse_mode="Markdown")
+        bot.send_message(m.chat.id, f"✅ Stock Added!\nProduct: {name}\nAdded: {len(codes)} pcs\nTotal: *{stock}* pcs", parse_mode="Markdown")
         admin_temp.pop(m.from_user.id, None)
     except Exception as e:
         bot.send_message(m.chat.id, f"❌ Error: {e}")
@@ -301,9 +313,8 @@ def dep_cb(c):
             bot.edit_message_text(f"❌ Rejected ID:{did}", c.message.chat.id, c.message.message_id)
     bot.answer_callback_query(c.id, "Done!")
 
-# ===== RENDER FIX - Flask main e, Bot thread e =====
 def run_bot():
-    print("Bot Started... STOCK QUANTITY SYSTEM - 7 stock -> 6 stock")
+    print("Bot Started... GROUP NOTIFY + /id")
     bot.infinity_polling()
 
 if __name__ == "__main__":
