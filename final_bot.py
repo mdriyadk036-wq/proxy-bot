@@ -1,18 +1,34 @@
-import telebot, sqlite3, os
+import telebot, sqlite3, os, threading
 from telebot import types
+from flask import Flask
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9233916179:AAG9sI6Uwuvug8V8JHUEPg6bPOU8X0fHuXs")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7486233932"))
-BKASH_NUMBER = os.getenv("BKASH_NUMBER", "01787344884")
-
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BKASH_NUMBER = os.getenv("BKASH_NUMBER", "017XXXXXXXX")
 bot = telebot.TeleBot(BOT_TOKEN)
+
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "✅ Bot is 24/7 Online - Stock Quantity System!"
+
+def run_flask():
+    # Render er PORT env use korbe
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+db_lock = threading.Lock()
 conn = sqlite3.connect("proxy.db", check_same_thread=False)
-cur = conn.cursor()
-cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
-cur.execute("CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, proxy TEXT, price REAL, status TEXT DEFAULT 'available', sold_to INTEGER)")
-cur.execute("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, trxid TEXT, status TEXT DEFAULT 'pending')")
-cur.execute("CREATE TABLE IF NOT EXISTS purchases (user_id INTEGER, proxy TEXT)")
-conn.commit()
+with db_lock:
+    conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0)")
+    conn.execute("CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, price REAL, stock INTEGER DEFAULT 0)")
+    conn.execute("CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER, proxy TEXT, status TEXT DEFAULT 'available', sold_to INTEGER, FOREIGN KEY(product_id) REFERENCES products(id))")
+    conn.execute("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, trxid TEXT, status TEXT DEFAULT 'pending')")
+    conn.execute("CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, proxy TEXT, product_name TEXT)")
+    conn.commit()
+
+def get_cur(): return conn.cursor()
+admin_temp = {}
 
 def user_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -30,178 +46,267 @@ def admin_kb():
 
 def admin_inline():
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("➕ Proxy Add", callback_data="adm_add"), types.InlineKeyboardButton("📦 Stock", callback_data="adm_stock"))
-    kb.add(types.InlineKeyboardButton("📥 Deposits", callback_data="adm_deps"), types.InlineKeyboardButton("👥 Users", callback_data="adm_users"))
-    kb.add(types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_bc"))
+    kb.add(types.InlineKeyboardButton("➕ Add New Product", callback_data="adm_add_product"), types.InlineKeyboardButton("📦 Add Stock", callback_data="adm_add_stock"))
+    kb.add(types.InlineKeyboardButton("📦 Show Stock", callback_data="adm_stock"), types.InlineKeyboardButton("📥 Deposits", callback_data="adm_deps"))
+    kb.add(types.InlineKeyboardButton("👥 Users", callback_data="adm_users"), types.InlineKeyboardButton("📋 All Codes", callback_data="adm_all_codes"))
     return kb
 
 @bot.message_handler(commands=['start'])
 def start(m):
-    cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (m.from_user.id,))
-    conn.commit()
+    with db_lock:
+        cur = get_cur()
+        cur.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (m.from_user.id,))
+        conn.commit()
     if m.from_user.id == ADMIN_ID:
-        bot.send_message(m.chat.id, f"Welcome Admin {m.from_user.first_name}! Bot Ready!", reply_markup=admin_kb())
-        bot.send_message(m.chat.id, "🔐 Admin Panel:", reply_markup=admin_inline())
+        bot.send_message(m.chat.id, "✅ Bot 24/7 Ready! Stock System!\nWelcome Admin!", reply_markup=admin_kb())
+        bot.send_message(m.chat.id, "🔐 Admin Panel (Stock Quantity):", reply_markup=admin_inline())
     else:
-        bot.send_message(m.chat.id, f"Welcome {m.from_user.first_name}! Balance diye proxy kinte parba.", reply_markup=user_kb())
+        bot.send_message(m.chat.id, "✅ Welcome!", reply_markup=user_kb())
 
-@bot.message_handler(func=lambda m: m.text=="🔐 Admin Panel")
-def open_admin(m):
-    if m.from_user.id != ADMIN_ID: return
-    bot.send_message(m.chat.id, "🔐 Admin Panel:", reply_markup=admin_inline())
+@bot.message_handler(func=lambda m: m.text == "💳 Balance")
+def bal(m):
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT balance FROM users WHERE user_id=?", (m.from_user.id,))
+        row = cur.fetchone()
+    bot.send_message(m.chat.id, f"💳 Balance: {row[0] if row else 0} TK")
+
+@bot.message_handler(func=lambda m: m.text == "🛡️ Get Code")
+def getcode(m):
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT proxy, product_name FROM purchases WHERE user_id=? ORDER BY id DESC", (m.from_user.id,))
+        rows = cur.fetchall()
+    if not rows:
+        bot.send_message(m.chat.id, "❌ No codes yet!")
+    else:
+        txt = "🛡️ Your Codes:\n\n"
+        for proxy, name in rows:
+            txt += f"*{name}*:\n`{proxy}`\n\n"
+        bot.send_message(m.chat.id, txt, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "💰 Deposit")
+def deposit(m):
+    bot.send_message(m.chat.id, f"💰 *bKash Number (tap to copy):*\n\n`{BKASH_NUMBER}`\n\n👆 Tap to copy\n\nTaka pathiye likho:\n`Amount TrxID` Ex: `100 ABC123`", parse_mode="Markdown")
+    bot.register_next_step_handler(m, deposit_step)
+
+def deposit_step(m):
+    try:
+        parts = m.text.split()
+        amount = float(parts[0])
+        trxid = parts[1] if len(parts) > 1 else m.text
+        with db_lock:
+            cur = get_cur()
+            cur.execute("INSERT INTO deposits (user_id, amount, trxid) VALUES (?, ?, ?)", (m.from_user.id, amount, trxid))
+            conn.commit()
+            cur.execute("SELECT id FROM deposits WHERE user_id=? AND trxid=? ORDER BY id DESC LIMIT 1", (m.from_user.id, trxid))
+            dep_id = cur.fetchone()[0]
+        bot.send_message(m.chat.id, "✅ Deposit request sent!")
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"dep_approve_{dep_id}"), types.InlineKeyboardButton("❌ Reject", callback_data=f"dep_reject_{dep_id}"))
+        bot.send_message(ADMIN_ID, f"📥 *New Deposit!*\nUser: `{m.from_user.id}`\nAmount: {amount}\nTrxID: `{trxid}`\nID: {dep_id}\n\n👆 *TrxID tap to copy*", parse_mode="Markdown", reply_markup=kb)
+    except:
+        bot.send_message(m.chat.id, "❌ Wrong format! Ex: 100 TrxID123")
+
+@bot.message_handler(func=lambda m: m.text == "🛍️ Buy Product")
+def buy(m):
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT id, name, price, stock FROM products WHERE stock > 0")
+        rows = cur.fetchall()
+    if not rows:
+        bot.send_message(m.chat.id, "❌ Out of stock! Admin will add soon.")
+        return
+    kb = types.InlineKeyboardMarkup()
+    for pid, name, price, stock in rows:
+        kb.add(types.InlineKeyboardButton(f"{name} ৳{price} - {stock} stock", callback_data=f"buy_prod_{pid}"))
+    bot.send_message(m.chat.id, "🛍️ *Available Products:*\nButton e click koro, kinle 1 stock kombe!", parse_mode="Markdown", reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_prod_"))
+def buy_prod_cb(c):
+    pid = int(c.data.split("_")[2])
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT name, price, stock FROM products WHERE id=?", (pid,))
+        prod = cur.fetchone()
+        if not prod or prod[2] <= 0:
+            bot.answer_callback_query(c.id, "❌ Out of stock!")
+            return
+        pname, price, stock = prod
+        cur.execute("SELECT balance FROM users WHERE user_id=?", (c.from_user.id,))
+        bal_row = cur.fetchone()
+        bal = bal_row[0] if bal_row else 0
+        if bal < price:
+            bot.answer_callback_query(c.id, f"❌ Need {price} TK")
+            return
+        cur.execute("SELECT id, proxy FROM proxies WHERE product_id=? AND status='available' LIMIT 1", (pid,))
+        proxy_row = cur.fetchone()
+        if not proxy_row:
+            bot.answer_callback_query(c.id, "❌ No code found!")
+            return
+        proxy_id, proxy_code = proxy_row
+        cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (price, c.from_user.id))
+        cur.execute("UPDATE proxies SET status='sold', sold_to=? WHERE id=?", (c.from_user.id, proxy_id))
+        cur.execute("UPDATE products SET stock=stock-1 WHERE id=?", (pid,))
+        cur.execute("INSERT INTO purchases (user_id, proxy, product_name) VALUES (?, ?, ?)", (c.from_user.id, proxy_code, pname))
+        conn.commit()
+        cur.execute("SELECT stock FROM products WHERE id=?", (pid,))
+        new_stock = cur.fetchone()[0]
+    bot.answer_callback_query(c.id, "✅ Purchased!")
+    bot.send_message(c.message.chat.id, f"✅ *Bought {pname}!*\n\nCode:\n`{proxy_code}`\n\nPrice: ৳{price}\nRemaining Stock: {new_stock} pcs", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "👤 My Profile")
+def profile(m):
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT balance FROM users WHERE user_id=?", (m.from_user.id,))
+        row = cur.fetchone()
+    bot.send_message(m.chat.id, f"👤 ID: {m.from_user.id}\nBalance: {row[0] if row else 0} TK")
+
+@bot.message_handler(func=lambda m: m.text == "🔐 Admin Panel")
+def admin_panel(m):
+    if m.from_user.id == ADMIN_ID:
+        bot.send_message(m.chat.id, "🔐 Admin Panel (Stock Quantity):", reply_markup=admin_inline())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_"))
 def admin_cb(c):
     if c.from_user.id != ADMIN_ID: return
-    if c.data == "adm_stock":
-        cur.execute("SELECT COUNT(*) FROM proxies WHERE status='available'")
-        av = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM proxies WHERE status='sold'")
-        sold = cur.fetchone()[0]
-        bot.send_message(c.message.chat.id, f"📦 Stock\nAvailable: {av}\nSold: {sold}")
-    elif c.data == "adm_deps":
-        cur.execute("SELECT id, user_id, amount, trxid FROM deposits WHERE status='pending' ORDER BY id DESC LIMIT 10")
-        rows = cur.fetchall()
+    if c.data == "adm_add_product":
+        bot.send_message(c.message.chat.id, "1️⃣ *Notun Product er Nam ki?*\nEx: `9proxy 50mb`", parse_mode="Markdown")
+        bot.register_next_step_handler(c.message, admin_add_product_name)
+    elif c.data == "adm_add_stock":
+        with db_lock:
+            cur = get_cur()
+            cur.execute("SELECT id, name, stock FROM products")
+            rows = cur.fetchall()
         if not rows:
-            bot.send_message(c.message.chat.id, "No pending deposit")
+            bot.send_message(c.message.chat.id, "❌ Age product add koro!")
             return
-        for r in rows:
-            kb = types.InlineKeyboardMarkup()
-            kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"ap_{r[0]}"), types.InlineKeyboardButton("❌ Reject", callback_data=f"rj_{r[0]}"))
-            bot.send_message(c.message.chat.id, f"ID:{r[0]}\nUser:{r[1]}\nAmt:{r[2]} BDT\nTrxID:{r[3]}", reply_markup=kb)
-    elif c.data == "adm_add":
-        msg = bot.send_message(c.message.chat.id, "Proxy dao format e:\n`ip:port:user:pass price`\nExample:\n`103.20.1.1:8080:u1:p1 100`\nMultiple line dite paro.", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, add_proxy_multi)
+        kb = types.InlineKeyboardMarkup()
+        for pid, name, stock in rows:
+            kb.add(types.InlineKeyboardButton(f"{name} - {stock} stock", callback_data=f"addstock_{pid}"))
+        bot.send_message(c.message.chat.id, "Konta te stock add korba?", reply_markup=kb)
+    elif c.data == "adm_stock":
+        with db_lock:
+            cur = get_cur()
+            cur.execute("SELECT id, name, price, stock FROM products ORDER BY stock DESC")
+            rows = cur.fetchall()
+        if not rows:
+            bot.send_message(c.message.chat.id, "📦 No products!")
+        else:
+            txt = "📦 *Stock Quantity:*\n\n"
+            for pid, name, price, stock in rows:
+                txt += f"ID:{pid} | {name} ৳{price}\nStock: *{stock}* pcs\n\n"
+            bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
+    elif c.data == "adm_deps":
+        with db_lock:
+            cur = get_cur()
+            cur.execute("SELECT id, user_id, amount, trxid FROM deposits WHERE status='pending'")
+            rows = cur.fetchall()
+        if not rows:
+            bot.send_message(c.message.chat.id, "No pending")
+        else:
+            for r in rows:
+                kb = types.InlineKeyboardMarkup()
+                kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"dep_approve_{r[0]}"), types.InlineKeyboardButton("❌ Reject", callback_data=f"dep_reject_{r[0]}"))
+                bot.send_message(c.message.chat.id, f"ID:{r[0]} User:`{r[1]}`\nAmount:{r[2]}\nTrxID: `{r[3]}`", parse_mode="Markdown", reply_markup=kb)
     elif c.data == "adm_users":
-        cur.execute("SELECT COUNT(*) FROM users")
-        total = cur.fetchone()[0]
-        bot.send_message(c.message.chat.id, f"Total Users: {total}")
-    elif c.data == "adm_bc":
-        msg = bot.send_message(c.message.chat.id, "Broadcast message likho, sob user er kache jabe:")
-        bot.register_next_step_handler(msg, do_broadcast)
+        with db_lock:
+            cur = get_cur()
+            cur.execute("SELECT COUNT(*) FROM users")
+            cnt = cur.fetchone()[0]
+        bot.send_message(c.message.chat.id, f"👥 Users: {cnt}")
+    elif c.data == "adm_all_codes":
+        with db_lock:
+            cur = get_cur()
+            cur.execute("SELECT p.name, pr.proxy, pr.status FROM proxies pr JOIN products p ON pr.product_id=p.id ORDER BY p.name LIMIT 20")
+            rows = cur.fetchall()
+        txt = "📋 All Codes (20 latest):\n\n" if rows else "No codes!"
+        for name, code, status in rows:
+            icon = "✅" if status == 'available' else "❌"
+            txt += f"{icon} {name}: `{code}` - {status}\n"
+        bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
 
-def add_proxy_multi(m):
-    count=0
-    for line in m.text.split("\n"):
-        line=line.strip()
-        if not line: continue
-        try:
-            if " " in line:
-                proxy, price = line.rsplit(" ",1)
-                price=float(price)
-            else:
-                proxy=line
-                price=100
-            cur.execute("INSERT INTO proxies (proxy, price) VALUES (?,?)", (proxy, price))
-            count+=1
-        except: pass
-    conn.commit()
-    bot.send_message(m.chat.id, f"✅ {count} ta proxy add hoise!")
+def admin_add_product_name(m):
+    admin_temp[m.from_user.id] = {"name": m.text}
+    bot.send_message(m.chat.id, "2️⃣ *Dam koto?* Ex: `10`", parse_mode="Markdown")
+    bot.register_next_step_handler(m, admin_add_product_price)
 
-def do_broadcast(m):
-    cur.execute("SELECT user_id FROM users")
-    sent=0
-    for (uid,) in cur.fetchall():
-        try:
-            bot.send_message(uid, f"📢 Notice:\n{m.text}")
-            sent+=1
-        except: pass
-    bot.send_message(m.chat.id, f"Broadcast done! {sent} jon ke pathano hoise.")
-
-@bot.message_handler(func=lambda m: m.text=="💰 Deposit")
-def deposit(m):
-    msg = bot.send_message(m.chat.id, "Amount likho (Min 100 BDT):")
-    bot.register_next_step_handler(msg, deposit_amt)
-
-def deposit_amt(m):
+def admin_add_product_price(m):
     try:
-        amt=float(m.text)
-        msg=bot.send_message(m.chat.id, f"{amt} BDT {BKASH_NUMBER} e send koro\nEkhon TrxID dao:")
-        bot.register_next_step_handler(msg, lambda x: save_dep(x, amt))
-    except: bot.send_message(m.chat.id, "Sothik number likho!")
+        price = float(m.text)
+        name = admin_temp[m.from_user.id]["name"]
+        with db_lock:
+            cur = get_cur()
+            cur.execute("INSERT INTO products (name, price, stock) VALUES (?, ?, 0)", (name, price))
+            conn.commit()
+            pid = cur.lastrowid
+        bot.send_message(m.chat.id, f"✅ *Product Added!*\nID:{pid}\nName: {name}\nPrice: ৳{price}\nStock: 0 pcs\n\n📦 Add Stock e click kore code add koro!", parse_mode="Markdown")
+        admin_temp.pop(m.from_user.id, None)
+    except Exception as e:
+        bot.send_message(m.chat.id, f"❌ Error: {e}")
 
-def save_dep(m, amt):
-    cur.execute("INSERT INTO deposits (user_id, amount, trxid) VALUES (?,?,?)", (m.from_user.id, amt, m.text.strip()))
-    conn.commit()
-    did=cur.lastrowid
-    bot.send_message(m.chat.id, "✅ Request admin er kache geche!")
-    kb=types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✅ Approve", callback_data=f"ap_{did}"), types.InlineKeyboardButton("❌ Reject", callback_data=f"rj_{did}"))
-    bot.send_message(ADMIN_ID, f"🔔 New Deposit!\nUser: {m.from_user.id}\nAmt: {amt} BDT\nTrxID: {m.text}", reply_markup=kb)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("addstock_"))
+def addstock_cb(c):
+    pid = int(c.data.split("_")[1])
+    admin_temp[c.from_user.id] = {"product_id": pid}
+    with db_lock:
+        cur = get_cur()
+        cur.execute("SELECT name FROM products WHERE id=?", (pid,))
+        name = cur.fetchone()[0]
+    bot.send_message(c.message.chat.id, f"📦 *{name}* e stock add korba\n\nProxy code gulo pathao, ek line e ekta!\nEx:\n`code1\ncode2\ncode3`\n\n10 ta pathale 10 stock barbe!", parse_mode="Markdown")
+    bot.register_next_step_handler(c.message, admin_add_stock_codes)
 
-@bot.message_handler(func=lambda m: m.text=="🛍️ Buy Product")
-def buy_list(m):
-    cur.execute("SELECT id, proxy, price FROM proxies WHERE status='available' ORDER BY price ASC LIMIT 10")
-    rows=cur.fetchall()
-    if not rows:
-        bot.send_message(m.chat.id, "😔 Stock khali! Admin Panel -> Proxy Add")
-        return
-    kb=types.InlineKeyboardMarkup()
-    for r in rows:
-        kb.add(types.InlineKeyboardButton(f"{r[1][:20]} - {r[2]} BDT", callback_data=f"buy_{r[0]}"))
-    bot.send_message(m.chat.id, "🛍️ Available Proxy List:", reply_markup=kb)
+def admin_add_stock_codes(m):
+    try:
+        pid = admin_temp[m.from_user.id]["product_id"]
+        codes = [line.strip() for line in m.text.split("\n") if line.strip()]
+        if not codes:
+            codes = [m.text.strip()]
+        with db_lock:
+            cur = get_cur()
+            for code in codes:
+                cur.execute("INSERT INTO proxies (product_id, proxy, status) VALUES (?, ?, 'available')", (pid, code))
+            cur.execute("UPDATE products SET stock=stock+? WHERE id=?", (len(codes), pid))
+            conn.commit()
+            cur.execute("SELECT name, stock, price FROM products WHERE id=?", (pid,))
+            name, stock, price = cur.fetchone()
+        bot.send_message(m.chat.id, f"✅ *Stock Added!*\nProduct: {name}\nAdded: {len(codes)} pcs\nTotal Stock: *{stock}* pcs\n\nUser dekhbe: `{name} ৳{price} - {stock} stock`", parse_mode="Markdown")
+        admin_temp.pop(m.from_user.id, None)
+    except Exception as e:
+        bot.send_message(m.chat.id, f"❌ Error: {e}")
 
-@bot.message_handler(func=lambda m: m.text=="💳 Balance")
-def balance_check(m):
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (m.from_user.id,))
-    row=cur.fetchone()
-    bal=row[0] if row else 0
-    bot.send_message(m.chat.id, f"💳 Your Balance\n💰 {bal} BDT", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda m: m.text=="👤 My Profile")
-def profile(m):
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (m.from_user.id,))
-    bal=cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM purchases WHERE user_id=?", (m.from_user.id,))
-    total=cur.fetchone()[0]
-    bot.send_message(m.chat.id, f"👤 Profile\nID: {m.from_user.id}\nBalance: {bal} BDT\nTotal Bought: {total}")
-
-@bot.message_handler(func=lambda m: m.text=="🛡️ Get Code")
-def getcode(m):
-    cur.execute("SELECT proxy FROM purchases WHERE user_id=? ORDER BY rowid DESC LIMIT 10", (m.from_user.id,))
-    rows=cur.fetchall()
-    if not rows: bot.send_message(m.chat.id, "Kono proxy kino nai!")
-    else:
-        txt="\n\n".join([f"`{r[0]}`" for r in rows])
-        bot.send_message(m.chat.id, f"🛡️ Your Proxies:\n\n{txt}", parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda c: True)
-def all_cb(c):
-    if c.data.startswith("ap_"):
-        did=int(c.data.split("_")[1])
+@bot.callback_query_handler(func=lambda c: c.data.startswith("dep_"))
+def dep_cb(c):
+    if c.from_user.id != ADMIN_ID: return
+    _, action, did = c.data.split("_")
+    did = int(did)
+    with db_lock:
+        cur = get_cur()
         cur.execute("SELECT user_id, amount FROM deposits WHERE id=?", (did,))
-        row=cur.fetchone()
+        row = cur.fetchone()
         if not row: return
-        uid, amt=row
-        cur.execute("UPDATE deposits SET status='approved' WHERE id=?", (did,))
-        cur.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amt, uid))
-        conn.commit()
-        bot.edit_message_text(f"✅ Approved ID {did} - {amt} BDT", c.message.chat.id, c.message.message_id)
-        try: bot.send_message(uid, f"✅ Tomar {amt} BDT Deposit Approved!")
-        except: pass
-    elif c.data.startswith("rj_"):
-        did=int(c.data.split("_")[1])
-        cur.execute("UPDATE deposits SET status='rejected' WHERE id=?", (did,))
-        conn.commit()
-        bot.edit_message_text(f"❌ Rejected ID {did}", c.message.chat.id, c.message.message_id)
-    elif c.data.startswith("buy_"):
-        pid=int(c.data.split("_")[1])
-        cur.execute("SELECT balance FROM users WHERE user_id=?", (c.from_user.id,))
-        bal=cur.fetchone()[0]
-        cur.execute("SELECT price, proxy FROM proxies WHERE id=? AND status='available'", (pid,))
-        row=cur.fetchone()
-        if not row:
-            bot.answer_callback_query(c.id, "Already sold!", show_alert=True)
-            return
-        price, proxy=row
-        if bal < price:
-            bot.answer_callback_query(c.id, f"Balance kom! {bal} ache, {price} lagbe", show_alert=True)
-            return
-        cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (price, c.from_user.id))
-        cur.execute("UPDATE proxies SET status='sold', sold_to=? WHERE id=?", (c.from_user.id, pid))
-        cur.execute("INSERT INTO purchases (user_id, proxy) VALUES (?,?)", (c.from_user.id, proxy))
-        conn.commit()
-        bot.send_message(c.message.chat.id, f"✅ Purchase Success!\n\nYour Proxy:\n`{proxy}`", parse_mode="Markdown")
+        uid, amt = row
+        if action == "approve":
+            cur.execute("UPDATE deposits SET status='approved' WHERE id=?", (did,))
+            cur.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (uid,))
+            cur.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amt, uid))
+            conn.commit()
+            bot.send_message(uid, f"✅ Approved! {amt} TK added!")
+            bot.edit_message_text(f"✅ Approved ID:{did}", c.message.chat.id, c.message.message_id)
+        else:
+            cur.execute("UPDATE deposits SET status='rejected' WHERE id=?", (did,))
+            conn.commit()
+            bot.send_message(uid, f"❌ Rejected ID:{did}")
+            bot.edit_message_text(f"❌ Rejected ID:{did}", c.message.chat.id, c.message.message_id)
+    bot.answer_callback_query(c.id, "Done!")
 
-print("Bot Started... 24/7 Ready!")
-bot.infinity_polling()
+# ===== RENDER FIX - Flask main e, Bot thread e =====
+def run_bot():
+    print("Bot Started... STOCK QUANTITY SYSTEM - 7 stock -> 6 stock")
+    bot.infinity_polling()
+
+if __name__ == "__main__":
+    threading.Thread(target=run_bot, daemon=True).start()
+    print("Flask Started for Render 24/7...")
+    run_flask()
