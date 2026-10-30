@@ -6,13 +6,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 BKASH_NUMBER = os.getenv("BKASH_NUMBER", "017XXXXXXXX")
 GROUP_ID = os.getenv("GROUP_ID", "")
-print(f"DEBUG GROUP_ID loaded: {GROUP_ID}")
+GROUP_USERNAME = "tamimproxybd" # Tomar public group er username @ chara
 bot = telebot.TeleBot(BOT_TOKEN)
 
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "✅ Bot is 24/7 Online - Group Notify FIXED!"
+    return "✅ Bot Online - Force Join + Group Notify ON!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -26,19 +26,32 @@ with db_lock:
     conn.execute("CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER, proxy TEXT, status TEXT DEFAULT 'available', sold_to INTEGER, FOREIGN KEY(product_id) REFERENCES products(id))")
     conn.execute("CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, trxid TEXT, status TEXT DEFAULT 'pending')")
     conn.execute("CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, proxy TEXT, product_name TEXT)")
-    # Fix old DB - add new columns if not exist
-    try:
-        conn.execute("ALTER TABLE purchases ADD COLUMN price REAL")
-    except:
-        pass
-    try:
-        conn.execute("ALTER TABLE purchases ADD COLUMN order_time TEXT")
-    except:
-        pass
+    try: conn.execute("ALTER TABLE purchases ADD COLUMN price REAL")
+    except: pass
+    try: conn.execute("ALTER TABLE purchases ADD COLUMN order_time TEXT")
+    except: pass
     conn.commit()
 
 def get_cur(): return conn.cursor()
 admin_temp = {}
+
+# === FORCE JOIN CHECK ===
+def is_joined(user_id):
+    if not GROUP_ID:
+        return True
+    if user_id == ADMIN_ID:
+        return True
+    try:
+        member = bot.get_chat_member(int(GROUP_ID), user_id)
+        return member.status in ['creator', 'administrator', 'member']
+    except:
+        return False
+
+def join_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📢 Join Group", url=f"https://t.me/{GROUP_USERNAME}"))
+    kb.add(types.InlineKeyboardButton("✅ Joined - Check", callback_data="check_joined"))
+    return kb
 
 def user_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -63,22 +76,45 @@ def admin_inline():
 
 @bot.message_handler(commands=['start'])
 def start(m):
+    if not is_joined(m.from_user.id):
+        bot.send_message(m.chat.id, f"❌ *Bot use korte hole age group e join korte hobe!*\n\n👇 Join koro, tarpor ✅ Joined e click koro!", parse_mode="Markdown", reply_markup=join_kb())
+        return
     with db_lock:
         cur = get_cur()
         cur.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (m.from_user.id,))
         conn.commit()
     if m.from_user.id == ADMIN_ID:
-        bot.send_message(m.chat.id, "✅ Bot Ready! Group Fix Applied!", reply_markup=admin_kb())
+        bot.send_message(m.chat.id, "✅ Bot Ready! Force Join ON!", reply_markup=admin_kb())
         bot.send_message(m.chat.id, "🔐 Admin Panel:", reply_markup=admin_inline())
     else:
-        bot.send_message(m.chat.id, "✅ Welcome!", reply_markup=user_kb())
+        bot.send_message(m.chat.id, "✅ Welcome! Group Join Verified!", reply_markup=user_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_joined")
+def check_joined_cb(c):
+    if is_joined(c.from_user.id):
+        bot.answer_callback_query(c.id, "✅ Joined! Thanks!")
+        bot.send_message(c.message.chat.id, "✅ Verified! Bot use korte paro!", reply_markup=user_kb())
+    else:
+        bot.answer_callback_query(c.id, "❌ Ekhono join koro nai!")
+        bot.send_message(c.message.chat.id, "❌ Ekhono group e join koro nai! Age join koro!", reply_markup=join_kb())
 
 @bot.message_handler(commands=['id', 'groupid'])
 def group_id_cmd(m):
-    bot.reply_to(m, f"🆔 Chat ID: `{m.chat.id}`\nGroup Env: `{GROUP_ID}`", parse_mode="Markdown")
+    bot.reply_to(m, f"🆔 Chat ID: `{m.chat.id}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['testgroup'])
+def test_group(m):
+    if m.from_user.id != ADMIN_ID: return
+    try:
+        bot.send_message(int(GROUP_ID), "✅ Test - Group Working!")
+        bot.reply_to(m, "✅ Group e geche!")
+    except Exception as e:
+        bot.reply_to(m, f"❌ Error: {e}")
 
 @bot.message_handler(func=lambda m: m.text == "💳 Balance")
 def bal(m):
+    if not is_joined(m.from_user.id):
+        bot.send_message(m.chat.id, "❌ Group e join koro!", reply_markup=join_kb()); return
     with db_lock:
         cur = get_cur()
         cur.execute("SELECT balance FROM users WHERE user_id=?", (m.from_user.id,))
@@ -87,6 +123,8 @@ def bal(m):
 
 @bot.message_handler(func=lambda m: m.text == "🛡️ Get Code")
 def getcode(m):
+    if not is_joined(m.from_user.id):
+        bot.send_message(m.chat.id, "❌ Group e join koro!", reply_markup=join_kb()); return
     with db_lock:
         cur = get_cur()
         cur.execute("SELECT proxy, product_name FROM purchases WHERE user_id=? ORDER BY id DESC", (m.from_user.id,))
@@ -101,7 +139,9 @@ def getcode(m):
 
 @bot.message_handler(func=lambda m: m.text == "💰 Deposit")
 def deposit(m):
-    bot.send_message(m.chat.id, f"💰 *bKash Number:*\n`{BKASH_NUMBER}`\n\nAmount TrxID Ex: `100 ABC123`", parse_mode="Markdown")
+    if not is_joined(m.from_user.id):
+        bot.send_message(m.chat.id, "❌ Group e join koro!", reply_markup=join_kb()); return
+    bot.send_message(m.chat.id, f"💰 *bKash:*\n`{BKASH_NUMBER}`\n\n`Amount TrxID` Ex: `100 ABC123`", parse_mode="Markdown")
     bot.register_next_step_handler(m, deposit_step)
 
 def deposit_step(m):
@@ -124,20 +164,25 @@ def deposit_step(m):
 
 @bot.message_handler(func=lambda m: m.text == "🛍️ Buy Product")
 def buy(m):
+    if not is_joined(m.from_user.id):
+        bot.send_message(m.chat.id, "❌ Group e join koro!", reply_markup=join_kb()); return
     with db_lock:
         cur = get_cur()
         cur.execute("SELECT id, name, price, stock FROM products WHERE stock > 0")
         rows = cur.fetchall()
     if not rows:
-        bot.send_message(m.chat.id, "❌ Out of stock!")
-        return
+        bot.send_message(m.chat.id, "❌ Out of stock!"); return
     kb = types.InlineKeyboardMarkup()
     for pid, name, price, stock in rows:
         kb.add(types.InlineKeyboardButton(f"{name} ৳{price} - {stock} stock", callback_data=f"buy_prod_{pid}"))
-    bot.send_message(m.chat.id, "🛍️ Available:", parse_mode="Markdown", reply_markup=kb)
+    bot.send_message(m.chat.id, "🛍️ Available:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_prod_"))
 def buy_prod_cb(c):
+    if not is_joined(c.from_user.id):
+        bot.answer_callback_query(c.id, "❌ Group e join koro!")
+        bot.send_message(c.message.chat.id, "❌ Group e join koro!", reply_markup=join_kb())
+        return
     pid = int(c.data.split("_")[2])
     try:
         with db_lock:
@@ -145,20 +190,17 @@ def buy_prod_cb(c):
             cur.execute("SELECT name, price, stock FROM products WHERE id=?", (pid,))
             prod = cur.fetchone()
             if not prod or prod[2] <= 0:
-                bot.answer_callback_query(c.id, "❌ Out of stock!")
-                return
+                bot.answer_callback_query(c.id, "❌ Out of stock!"); return
             pname, price, stock = prod
             cur.execute("SELECT balance FROM users WHERE user_id=?", (c.from_user.id,))
             bal_row = cur.fetchone()
             bal = bal_row[0] if bal_row else 0
             if bal < price:
-                bot.answer_callback_query(c.id, f"❌ Need {price} TK")
-                return
+                bot.answer_callback_query(c.id, f"❌ Need {price} TK"); return
             cur.execute("SELECT id, proxy FROM proxies WHERE product_id=? AND status='available' LIMIT 1", (pid,))
             proxy_row = cur.fetchone()
             if not proxy_row:
-                bot.answer_callback_query(c.id, "❌ No code!")
-                return
+                bot.answer_callback_query(c.id, "❌ No code!"); return
             proxy_id, proxy_code = proxy_row
             order_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (price, c.from_user.id))
@@ -169,26 +211,17 @@ def buy_prod_cb(c):
             conn.commit()
             cur.execute("SELECT stock FROM products WHERE id=?", (pid,))
             new_stock = cur.fetchone()[0]
-
         bot.answer_callback_query(c.id, "✅ Purchased!")
         bot.send_message(c.message.chat.id, f"✅ Bought {pname}!\nOrder ID: #{order_id}\nCode:\n`{proxy_code}`\nPrice: ৳{price}\nLeft: {new_stock}", parse_mode="Markdown")
-
         if GROUP_ID:
             try:
-                gid = int(GROUP_ID)
                 buyer_name = f"@{c.from_user.username}" if c.from_user.username else c.from_user.first_name
-                group_msg = f"🛍️ *New Order!*\n\n📦 Product: *{pname}*\n🆔 Order ID: `#{order_id}`\n👤 Buyer: {buyer_name} (`{c.from_user.id}`)\n💰 Price: ৳{price}\n📊 Status: *Paid ✅*\n📦 Stock Left: *{new_stock} pcs*\n⏰ {order_time}"
-                bot.send_message(gid, group_msg, parse_mode="Markdown")
-                print(f"Group msg sent to {gid}")
+                group_msg = f"🛍️ *New Order!*\n\n📦 Product: *{pname}*\n🆔 Order ID: `#{order_id}`\n👤 Buyer: {buyer_name}\n💰 Price: ৳{price}\n📦 Stock Left: *{new_stock} pcs*"
+                bot.send_message(int(GROUP_ID), group_msg, parse_mode="Markdown")
             except Exception as e:
-                print(f"Group send error: {e}")
-                bot.send_message(c.message.chat.id, f"⚠️ Group send failed: {e}")
-        else:
-            print("GROUP_ID empty!")
-
+                print(f"Group error: {e}")
     except Exception as e:
-        print(f"Buy error: {e}")
-        bot.send_message(c.message.chat.id, f"❌ Buy error: {e}")
+        bot.send_message(c.message.chat.id, f"❌ Error: {e}")
 
 @bot.message_handler(func=lambda m: m.text == "👤 My Profile")
 def profile(m):
@@ -215,8 +248,7 @@ def admin_cb(c):
             cur.execute("SELECT id, name, stock FROM products")
             rows = cur.fetchall()
         if not rows:
-            bot.send_message(c.message.chat.id, "❌ Add product first!")
-            return
+            bot.send_message(c.message.chat.id, "❌ Add product first!"); return
         kb = types.InlineKeyboardMarkup()
         for pid, name, stock in rows:
             kb.add(types.InlineKeyboardButton(f"{name} - {stock}", callback_data=f"addstock_{pid}"))
@@ -228,7 +260,7 @@ def admin_cb(c):
             rows = cur.fetchall()
         txt = "📦 Stock:\n\n" if rows else "No products!"
         for pid, name, price, stock in rows:
-            txt += f"ID:{pid} | {name} ৳{price}\nStock: {stock}\n\n"
+            txt += f"ID:{pid} | {name} ৳{price} Stock:{stock}\n\n"
         bot.send_message(c.message.chat.id, txt, parse_mode="Markdown")
     elif c.data == "adm_deps":
         with db_lock:
@@ -292,8 +324,7 @@ def admin_add_stock_codes(m):
     try:
         pid = admin_temp[m.from_user.id]["product_id"]
         codes = [line.strip() for line in m.text.split("\n") if line.strip()]
-        if not codes:
-            codes = [m.text.strip()]
+        if not codes: codes = [m.text.strip()]
         with db_lock:
             cur = get_cur()
             for code in codes:
@@ -333,10 +364,9 @@ def dep_cb(c):
     bot.answer_callback_query(c.id, "Done!")
 
 def run_bot():
-    print("Bot Started... FIXED")
+    print(f"Bot Started... GROUP_ID={GROUP_ID} Force Join ON")
     bot.infinity_polling()
 
 if __name__ == "__main__":
     threading.Thread(target=run_bot, daemon=True).start()
-    print("Flask Started...")
     run_flask()
